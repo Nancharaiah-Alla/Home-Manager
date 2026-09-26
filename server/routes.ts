@@ -44,26 +44,32 @@ async function verifyGoogleCredential(
     // 2. If it is a Firebase ID Token, verify with Firebase Identity Toolkit
     try {
       const configPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
-      if (fs.existsSync(configPath)) {
-        const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-        if (config.apiKey) {
-          const res = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${config.apiKey}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ idToken }),
-          });
-          if (res.ok) {
-            const data = (await res.json()) as {
-              users?: Array<{ email?: string; displayName?: string; photoUrl?: string }>;
+      let apiKey = process.env.FIREBASE_API_KEY || process.env.VITE_FIREBASE_API_KEY;
+      if (!apiKey && fs.existsSync(configPath)) {
+        try {
+          const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+          apiKey = config.apiKey;
+        } catch {
+          // ignore
+        }
+      }
+      if (apiKey) {
+        const res = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${apiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken }),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as {
+            users?: Array<{ email?: string; displayName?: string; photoUrl?: string }>;
+          };
+          const user = data.users?.[0];
+          if (user?.email) {
+            return {
+              email: user.email.toLowerCase(),
+              name: user.displayName,
+              picture: user.photoUrl,
             };
-            const user = data.users?.[0];
-            if (user?.email) {
-              return {
-                email: user.email.toLowerCase(),
-                name: user.displayName,
-                picture: user.photoUrl,
-              };
-            }
           }
         }
       }

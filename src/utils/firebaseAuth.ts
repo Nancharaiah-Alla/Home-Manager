@@ -11,8 +11,19 @@ import {
 } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
 
+// Support both embedded firebase-applet-config.json and Vercel/Vite environment variables
+const env = import.meta.env;
+const resolvedConfig = {
+  apiKey: env.VITE_FIREBASE_API_KEY || firebaseConfig.apiKey || '',
+  authDomain: env.VITE_FIREBASE_AUTH_DOMAIN || firebaseConfig.authDomain || '',
+  projectId: env.VITE_FIREBASE_PROJECT_ID || firebaseConfig.projectId || '',
+  storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || firebaseConfig.storageBucket || '',
+  messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID || firebaseConfig.messagingSenderId || '',
+  appId: env.VITE_FIREBASE_APP_ID || firebaseConfig.appId || '',
+};
+
 // Initialize Firebase App singleton
-const app: FirebaseApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
+const app: FirebaseApp = getApps().length === 0 ? initializeApp(resolvedConfig) : getApp();
 export const auth: Auth = getAuth(app);
 
 // Configure Google Provider with required profile and email scopes
@@ -66,6 +77,16 @@ export async function signInWithGoogleOAuth(): Promise<GoogleAuthResult> {
     return await extractGoogleCredentials(cred);
   } catch (err: unknown) {
     const error = err as { code?: string; message?: string };
+    
+    // Explicit domain authorization error guide for Vercel deployments
+    if (error.code === 'auth/unauthorized-domain') {
+      const currentHost = typeof window !== 'undefined' ? window.location.hostname : 'your Vercel domain';
+      throw new Error(
+        `Vercel domain "${currentHost}" is not authorized in Firebase. ` +
+        `To fix: Open Firebase Console -> Authentication -> Settings -> Authorized Domains, and add "${currentHost}".`
+      );
+    }
+
     // If popup is blocked by the browser, fallback to redirect flow
     if (error.code === 'auth/popup-blocked') {
       console.warn('Popup blocked, attempting redirect flow to Google...');
@@ -88,8 +109,16 @@ export async function checkGoogleRedirectResult(): Promise<GoogleAuthResult | nu
     if (cred && cred.user) {
       return await extractGoogleCredentials(cred);
     }
-  } catch (err) {
-    console.warn('Error checking Google redirect result:', err);
+  } catch (err: unknown) {
+    const error = err as { code?: string; message?: string };
+    if (error.code === 'auth/unauthorized-domain') {
+      const currentHost = typeof window !== 'undefined' ? window.location.hostname : 'your Vercel domain';
+      console.error(
+        `Vercel domain "${currentHost}" is not authorized in Firebase Console -> Authentication -> Settings -> Authorized Domains.`
+      );
+    } else {
+      console.warn('Error checking Google redirect result:', err);
+    }
   }
   return null;
 }

@@ -96,9 +96,21 @@ export const LoginPage: React.FC<LoginPageProps> = ({
           </div>
 
           {error && (
-            <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 text-xs rounded-xl flex items-center gap-2 text-left">
-              <AlertCircle className="w-4 h-4 shrink-0" />
-              <span>{error}</span>
+            <div className="p-3.5 bg-rose-50 border border-rose-200 text-rose-800 text-xs rounded-2xl flex flex-col gap-1.5 text-left">
+              <div className="flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                <span className="font-semibold leading-relaxed">{error}</span>
+              </div>
+              {error.includes('Authorized Domains') && (
+                <div className="mt-1 p-2.5 bg-white/90 rounded-xl border border-rose-200/80 text-[11px] text-slate-700 space-y-1">
+                  <div className="font-bold text-slate-900">How to authorize this domain in 3 steps:</div>
+                  <ol className="list-decimal list-inside space-y-0.5 text-slate-600">
+                    <li>Open <strong>Firebase Console</strong> (project: <code className="font-mono bg-slate-100 px-1 rounded">gen-lang-client-0630101031</code>)</li>
+                    <li>Go to <strong>Build</strong> &rarr; <strong>Authentication</strong> &rarr; <strong>Settings</strong> &rarr; <strong>Authorized Domains</strong></li>
+                    <li>Click <strong>Add domain</strong> and enter: <code className="font-mono bg-amber-100 text-amber-900 px-1 py-0.5 rounded font-semibold">{typeof window !== 'undefined' ? window.location.hostname : 'your-domain.vercel.app'}</code></li>
+                  </ol>
+                </div>
+              )}
             </div>
           )}
 

@@ -2,8 +2,10 @@ import initSqlJs, { Database } from 'sql.js';
 import fs from 'fs';
 import path from 'path';
 
-const DATA_DIR = path.resolve(process.cwd(), 'data');
+const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+const DATA_DIR = isServerless ? '/tmp/homemanager-data' : path.resolve(process.cwd(), 'data');
 const DB_FILE = path.resolve(DATA_DIR, 'homemanager.sqlite');
+const SEED_SOURCE_FILE = path.resolve(process.cwd(), 'data/homemanager.sqlite');
 
 let dbInstance: Database | null = null;
 
@@ -11,11 +13,32 @@ export async function getDb(): Promise<Database> {
   if (dbInstance) return dbInstance;
 
   if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+    try {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    } catch (e) {
+      console.warn('Could not create DATA_DIR:', e);
+    }
+  }
+
+  // In serverless, if /tmp doesn't have the db yet, copy from the repository build if present
+  if (isServerless && !fs.existsSync(DB_FILE) && fs.existsSync(SEED_SOURCE_FILE)) {
+    try {
+      fs.copyFileSync(SEED_SOURCE_FILE, DB_FILE);
+    } catch (e) {
+      console.warn('Could not copy seed DB to /tmp:', e);
+    }
   }
 
   const SQL = await initSqlJs({
-    locateFile: (file) => path.resolve(process.cwd(), 'node_modules/sql.js/dist', file),
+    locateFile: (file) => {
+      try {
+        const localPath = path.resolve(process.cwd(), 'node_modules/sql.js/dist', file);
+        if (fs.existsSync(localPath)) return localPath;
+      } catch {
+        // ignore
+      }
+      return file;
+    },
   });
 
   let fileBuffer: Buffer | null = null;
