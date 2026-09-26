@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { ArrowLeft, Sparkles, AlertCircle, ShieldCheck } from 'lucide-react';
+import { ArrowLeft, Sparkles, AlertCircle, ShieldCheck, Copy, Check, ExternalLink } from 'lucide-react';
 
 interface LoginPageProps {
   onBackToLanding: () => void;
@@ -14,6 +14,17 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   const { loginGoogle, login } = useAuth();
   const [isGoogleLoading, setIsGoogleLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const currentHost = typeof window !== 'undefined' ? window.location.hostname : 'home-manager-psi.vercel.app';
+
+  const handleCopyHost = () => {
+    if (typeof window !== 'undefined' && navigator.clipboard) {
+      navigator.clipboard.writeText(currentHost);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    }
+  };
 
   const handleGoogleSignIn = async () => {
     setError(null);
@@ -43,6 +54,11 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       setIsGoogleLoading(false);
     }
   };
+
+  const isDomainError = error && (
+    error.toLowerCase().includes('authorized domain') ||
+    error.toLowerCase().includes('unauthorized-domain')
+  );
 
   return (
     <div className="min-h-screen bg-[#FAF8F5] text-slate-900 flex flex-col justify-between selection:bg-[#F6C343]/30">
@@ -96,18 +112,55 @@ export const LoginPage: React.FC<LoginPageProps> = ({
           </div>
 
           {error && (
-            <div className="p-3.5 bg-rose-50 border border-rose-200 text-rose-800 text-xs rounded-2xl flex flex-col gap-1.5 text-left">
+            <div className="p-4 bg-rose-50 border border-rose-200 text-rose-800 text-xs rounded-2xl flex flex-col gap-2.5 text-left">
               <div className="flex items-start gap-2">
                 <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
                 <span className="font-semibold leading-relaxed">{error}</span>
               </div>
-              {error.includes('Authorized Domains') && (
-                <div className="mt-1 p-2.5 bg-white/90 rounded-xl border border-rose-200/80 text-[11px] text-slate-700 space-y-1">
-                  <div className="font-bold text-slate-900">How to authorize this domain in 3 steps:</div>
-                  <ol className="list-decimal list-inside space-y-0.5 text-slate-600">
-                    <li>Open <strong>Firebase Console</strong> (project: <code className="font-mono bg-slate-100 px-1 rounded">gen-lang-client-0630101031</code>)</li>
-                    <li>Go to <strong>Build</strong> &rarr; <strong>Authentication</strong> &rarr; <strong>Settings</strong> &rarr; <strong>Authorized Domains</strong></li>
-                    <li>Click <strong>Add domain</strong> and enter: <code className="font-mono bg-amber-100 text-amber-900 px-1 py-0.5 rounded font-semibold">{typeof window !== 'undefined' ? window.location.hostname : 'your-domain.vercel.app'}</code></li>
+
+              {isDomainError && (
+                <div className="p-3 bg-white/95 rounded-xl border border-rose-200 text-[11px] text-slate-700 space-y-2.5 shadow-2xs">
+                  <div className="font-bold text-slate-900 flex items-center justify-between">
+                    <span>Quick Fix (takes 30 seconds):</span>
+                    <a
+                      href="https://console.firebase.google.com/project/gen-lang-client-0630101031/authentication/settings"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-blue-600 hover:underline font-semibold"
+                    >
+                      <span>Open Firebase Console</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                  </div>
+
+                  <div className="flex items-center gap-2 p-2 bg-slate-50 rounded-lg border border-slate-200">
+                    <span className="text-slate-500 text-[10px]">Your Domain:</span>
+                    <code className="font-mono font-semibold text-slate-900 bg-amber-50 text-amber-900 px-1.5 py-0.5 rounded text-xs select-all">
+                      {currentHost}
+                    </code>
+                    <button
+                      type="button"
+                      onClick={handleCopyHost}
+                      className="ml-auto inline-flex items-center gap-1 px-2 py-1 bg-white hover:bg-slate-100 border border-slate-200 rounded text-[10px] font-medium text-slate-700 cursor-pointer transition-colors"
+                    >
+                      {copied ? (
+                        <>
+                          <Check className="w-3 h-3 text-emerald-600" />
+                          <span className="text-emerald-700">Copied</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3 h-3 text-slate-500" />
+                          <span>Copy</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  <ol className="list-decimal list-inside space-y-1 text-slate-600 text-[10px] leading-relaxed">
+                    <li>In Firebase Console, go to <strong>Authentication</strong> &rarr; <strong>Settings</strong> tab.</li>
+                    <li>Scroll down to <strong>Authorized domains</strong> and click <strong>Add domain</strong>.</li>
+                    <li>Paste <code className="font-mono bg-slate-100 px-1 py-0.5 rounded font-semibold text-slate-800">{currentHost}</code> and click <strong>Save</strong>.</li>
                   </ol>
                 </div>
               )}
