@@ -11,7 +11,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-// Enable CORS for Vercel preview URLs and custom domains
+// Enable CORS and popups for OAuth window.close compatibility
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (origin) {
@@ -22,6 +22,7 @@ app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
 
   if (req.method === 'OPTIONS') {
     res.sendStatus(204);
@@ -32,23 +33,31 @@ app.use((req, res, next) => {
 
 // Serverless DB initialization singleton
 let initPromise: Promise<void> | null = null;
-function ensureServerlessDb() {
+async function ensureServerlessDb() {
   if (!initPromise) {
     initPromise = (async () => {
+      await getDb();
       try {
-        await getDb();
         seedDemoHouseholdIfEmpty();
-      } catch (err) {
-        console.error('Database initialization error in Vercel serverless function:', err);
+      } catch (seedErr) {
+        console.warn('Seed demo check encountered error:', seedErr);
       }
     })();
   }
   return initPromise;
 }
 
-app.use(async (_req, _res, next) => {
-  await ensureServerlessDb();
-  next();
+app.use(async (_req, res, next) => {
+  try {
+    await ensureServerlessDb();
+    next();
+  } catch (err) {
+    console.error('Database initialization error in Vercel serverless function:', err);
+    initPromise = null; // Allow retry on subsequent calls
+    res.status(500).json({
+      error: 'Database failed to initialize: ' + (err instanceof Error ? err.message : String(err)),
+    });
+  }
 });
 
 // Handle both /api prefixed routes and stripped routes

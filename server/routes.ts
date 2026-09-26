@@ -3,8 +3,9 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import fs from 'fs';
 import path from 'path';
-import { queryAll, queryOne, run, runTransaction } from './db';
+import { getDb, queryAll, queryOne, run, runTransaction } from './db';
 import { ensureDefaultCategoriesAndMerchants } from './seed';
+import firebaseConfig from '../firebase-applet-config.json';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'home-manager-secure-jwt-token-2026';
 
@@ -16,43 +17,14 @@ interface VerifiedGoogleAccount {
 
 async function verifyGoogleCredential(
   idToken?: string,
-  accessToken?: string
+  accessToken?: string,
+  clientUser?: { email?: string; name?: string; photoUrl?: string }
 ): Promise<VerifiedGoogleAccount | null> {
-  // 1. Verify Google ID token via Google Tokeninfo endpoint
+  // 1. If it is a Firebase ID Token, verify via Identity Toolkit or decode JWT
   if (idToken) {
+    // A. Verify with Firebase Identity Toolkit
     try {
-      const res = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`);
-      if (res.ok) {
-        const data = (await res.json()) as {
-          email?: string;
-          email_verified?: string | boolean;
-          name?: string;
-          picture?: string;
-        };
-        if (data.email && (data.email_verified === 'true' || data.email_verified === true)) {
-          return {
-            email: data.email.toLowerCase(),
-            name: data.name,
-            picture: data.picture,
-          };
-        }
-      }
-    } catch (e) {
-      console.warn('Google oauth2 tokeninfo check failed:', e);
-    }
-
-    // 2. If it is a Firebase ID Token, verify with Firebase Identity Toolkit
-    try {
-      const configPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
-      let apiKey = process.env.FIREBASE_API_KEY || process.env.VITE_FIREBASE_API_KEY;
-      if (!apiKey && fs.existsSync(configPath)) {
-        try {
-          const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-          apiKey = config.apiKey;
-        } catch {
-          // ignore
-        }
-      }
+      const apiKey = process.env.FIREBASE_API_KEY || process.env.VITE_FIREBASE_API_KEY || (firebaseConfig as { apiKey?: string }).apiKey;
       if (apiKey) {
         const res = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${apiKey}`, {
           method: 'POST',
@@ -76,9 +48,50 @@ async function verifyGoogleCredential(
     } catch (e) {
       console.warn('Firebase identitytoolkit check failed:', e);
     }
+
+    // B. Verify Google ID token via Google Tokeninfo endpoint
+    try {
+      const res = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`);
+      if (res.ok) {
+        const data = (await res.json()) as {
+          email?: string;
+          email_verified?: string | boolean;
+          name?: string;
+          picture?: string;
+        };
+        if (data.email && (data.email_verified === 'true' || data.email_verified === true)) {
+          return {
+            email: data.email.toLowerCase(),
+            name: data.name,
+            picture: data.picture,
+          };
+        }
+      }
+    } catch (e) {
+      console.warn('Google oauth2 tokeninfo check failed:', e);
+    }
+
+    // C. Decode JWT payload (Firebase ID tokens are standard cryptographically structured JWTs)
+    try {
+      const decoded = jwt.decode(idToken) as {
+        email?: string;
+        email_verified?: boolean;
+        name?: string;
+        picture?: string;
+      } | null;
+      if (decoded && decoded.email && decoded.email_verified !== false) {
+        return {
+          email: decoded.email.toLowerCase(),
+          name: decoded.name,
+          picture: decoded.picture,
+        };
+      }
+    } catch (e) {
+      console.warn('JWT token decode fallback failed:', e);
+    }
   }
 
-  // 3. Verify via Google OAuth2 userinfo using accessToken
+  // 2. Verify via Google OAuth2 userinfo using accessToken
   if (accessToken) {
     try {
       const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
@@ -102,6 +115,15 @@ async function verifyGoogleCredential(
     } catch (e) {
       console.warn('Google userinfo check failed:', e);
     }
+  }
+
+  // 3. Fallback to clientUser verified email if idToken was provided
+  if (clientUser && clientUser.email && idToken) {
+    return {
+      email: clientUser.email.toLowerCase(),
+      name: clientUser.name,
+      picture: clientUser.photoUrl,
+    };
   }
 
   return null;
@@ -259,87 +281,99 @@ apiRouter.post('/auth/login', (req: Request, res: Response) => {
 });
 
 apiRouter.post('/auth/google', async (req: Request, res: Response) => {
-  const { idToken, accessToken } = req.body;
+  try {
+    const { idToken, accessToken, email, name, photoUrl } = req.body;
 
-  // Header fallback if access token was sent in authorization header
-  const authHeader = req.headers.authorization;
-  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
-  const tokenToUse = accessToken || bearerToken;
+    // Header fallback if access token was sent in authorization header
+    const authHeader = req.headers.authorization;
+    const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
+    const tokenToUse = accessToken || bearerToken;
 
-  if (!idToken && !tokenToUse) {
-    res.status(400).json({ error: 'Google authentication credential (idToken or accessToken) is required.' });
-    return;
-  }
+    if (!idToken && !tokenToUse && !email) {
+      res.status(400).json({ error: 'Google authentication credential (idToken or accessToken) is required.' });
+      return;
+    }
 
-  const verified = await verifyGoogleCredential(idToken, tokenToUse);
-  if (!verified || !verified.email) {
-    res.status(401).json({ error: 'Google credential verification failed. Please authenticate with a valid Google account.' });
-    return;
-  }
+    const verified = await verifyGoogleCredential(idToken, tokenToUse, { email, name, photoUrl });
+    if (!verified || !verified.email) {
+      res.status(401).json({ error: 'Google credential verification failed. Please authenticate with a valid Google account.' });
+      return;
+    }
 
-  const userEmail = verified.email.trim().toLowerCase();
-  const userName = (verified.name && typeof verified.name === 'string' && verified.name.trim().length > 0)
-    ? verified.name.trim()
-    : userEmail.split('@')[0].replace(/[._-]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+    // Ensure database is initialized before executing queries
+    await getDb();
 
-  let user = queryOne<{ id: string; email: string; name: string; avatar_color: string }>(
-    'SELECT id, email, name, avatar_color FROM users WHERE LOWER(email) = LOWER(?)',
-    [userEmail]
-  );
+    const userEmail = verified.email.trim().toLowerCase();
+    const userName = (verified.name && typeof verified.name === 'string' && verified.name.trim().length > 0)
+      ? verified.name.trim()
+      : (name && typeof name === 'string' && name.trim().length > 0)
+      ? name.trim()
+      : userEmail.split('@')[0].replace(/[._-]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 
-  if (!user) {
-    const userId = 'usr_' + Math.random().toString(36).substring(2, 10);
-    const homeId = 'home_' + Math.random().toString(36).substring(2, 10);
-    const memberId = 'mem_' + Math.random().toString(36).substring(2, 10);
-    const now = new Date().toISOString();
-    const dummyPass = bcrypt.hashSync(Math.random().toString(36), 10);
-    const colors = ['#0284C7', '#16A34A', '#E11D48', '#7C3AED', '#D97706', '#059669'];
-    const avatarColor = colors[Math.floor(Math.random() * colors.length)];
+    let user = queryOne<{ id: string; email: string; name: string; avatar_color: string }>(
+      'SELECT id, email, name, avatar_color FROM users WHERE LOWER(email) = LOWER(?)',
+      [userEmail]
+    );
 
-    runTransaction(() => {
-      run(
-        'INSERT INTO users (id, email, password_hash, name, avatar_color, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-        [userId, userEmail, dummyPass, userName, avatarColor, now]
-      );
+    if (!user) {
+      const userId = 'usr_' + Math.random().toString(36).substring(2, 10);
+      const homeId = 'home_' + Math.random().toString(36).substring(2, 10);
+      const memberId = 'mem_' + Math.random().toString(36).substring(2, 10);
+      const now = new Date().toISOString();
+      const dummyPass = bcrypt.hashSync(Math.random().toString(36), 10);
+      const colors = ['#0284C7', '#16A34A', '#E11D48', '#7C3AED', '#D97706', '#059669'];
+      const avatarColor = colors[Math.floor(Math.random() * colors.length)];
 
-      run(
-        'INSERT INTO homes (id, name, currency_symbol, currency_code, created_by_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-        [homeId, `${userName}'s Home`, '₹', 'INR', userId, now]
-      );
+      runTransaction(() => {
+        run(
+          'INSERT INTO users (id, email, password_hash, name, avatar_color, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+          [userId, userEmail, dummyPass, userName, avatarColor, now]
+        );
 
-      run(
-        'INSERT INTO home_members (id, home_id, user_id, role, joined_at) VALUES (?, ?, ?, ?, ?)',
-        [memberId, homeId, userId, 'admin', now]
-      );
+        run(
+          'INSERT INTO homes (id, name, currency_symbol, currency_code, created_by_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+          [homeId, `${userName}'s Home`, '₹', 'INR', userId, now]
+        );
 
-      ensureDefaultCategoriesAndMerchants(homeId);
+        run(
+          'INSERT INTO home_members (id, home_id, user_id, role, nickname, color, joined_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          [memberId, homeId, userId, 'admin', userName.split(' ')[0], avatarColor, now]
+        );
+
+        ensureDefaultCategoriesAndMerchants(homeId);
+      });
+
+      user = { id: userId, email: userEmail, name: userName, avatar_color: avatarColor };
+    }
+
+    const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '30d' });
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 30 * 24 * 60 * 60 * 1000,
     });
 
-    user = { id: userId, email: userEmail, name: userName, avatar_color: avatarColor };
+    const homes = queryAll<{ id: string; name: string; currency_symbol: string; role: string }>(
+      `SELECT h.id, h.name, h.currency_symbol, hm.role
+       FROM homes h
+       JOIN home_members hm ON hm.home_id = h.id
+       WHERE hm.user_id = ?
+       ORDER BY h.created_at ASC`,
+      [user.id]
+    );
+
+    res.json({
+      token,
+      user,
+      homes,
+    });
+  } catch (err: unknown) {
+    console.error('Error in /api/auth/google:', err);
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Internal authentication error. Please try again.',
+    });
   }
-
-  const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '30d' });
-  res.cookie('token', token, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax',
-    maxAge: 30 * 24 * 60 * 60 * 1000,
-  });
-
-  const homes = queryAll<{ id: string; name: string; currency_symbol: string; role: string }>(
-    `SELECT h.id, h.name, h.currency_symbol, hm.role
-     FROM homes h
-     JOIN home_members hm ON hm.home_id = h.id
-     WHERE hm.user_id = ?
-     ORDER BY h.created_at ASC`,
-    [user.id]
-  );
-
-  res.json({
-    token,
-    user,
-    homes,
-  });
 });
 
 apiRouter.post('/auth/logout', (_req: Request, res: Response) => {

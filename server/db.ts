@@ -1,6 +1,10 @@
 import initSqlJs, { Database } from 'sql.js';
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
 const DATA_DIR = isServerless ? '/tmp/homemanager-data' : path.resolve(process.cwd(), 'data');
@@ -8,6 +12,25 @@ const DB_FILE = path.resolve(DATA_DIR, 'homemanager.sqlite');
 const SEED_SOURCE_FILE = path.resolve(process.cwd(), 'data/homemanager.sqlite');
 
 let dbInstance: Database | null = null;
+
+function getWasmBinary(): Buffer | null {
+  const candidates = [
+    path.resolve(__dirname, 'sql-wasm.wasm'),
+    path.resolve(process.cwd(), 'server/sql-wasm.wasm'),
+    path.resolve(process.cwd(), 'data/sql-wasm.wasm'),
+    path.resolve(process.cwd(), 'node_modules/sql.js/dist/sql-wasm.wasm'),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) {
+      try {
+        return fs.readFileSync(p);
+      } catch (e) {
+        console.warn(`Could not read wasm at ${p}:`, e);
+      }
+    }
+  }
+  return null;
+}
 
 export async function getDb(): Promise<Database> {
   if (dbInstance) return dbInstance;
@@ -29,17 +52,12 @@ export async function getDb(): Promise<Database> {
     }
   }
 
-  const SQL = await initSqlJs({
-    locateFile: (file) => {
-      try {
-        const localPath = path.resolve(process.cwd(), 'node_modules/sql.js/dist', file);
-        if (fs.existsSync(localPath)) return localPath;
-      } catch {
-        // ignore
-      }
-      return file;
-    },
-  });
+  const wasmBinary = getWasmBinary();
+  const sqlConfig: Record<string, unknown> = {};
+  if (wasmBinary) {
+    sqlConfig.wasmBinary = wasmBinary.buffer.slice(wasmBinary.byteOffset, wasmBinary.byteOffset + wasmBinary.byteLength);
+  }
+  const SQL = await initSqlJs(sqlConfig);
 
   let fileBuffer: Buffer | null = null;
   if (fs.existsSync(DB_FILE)) {
@@ -51,7 +69,11 @@ export async function getDb(): Promise<Database> {
   }
 
   dbInstance = fileBuffer ? new SQL.Database(fileBuffer) : new SQL.Database();
-  dbInstance.run('PRAGMA foreign_keys = ON;');
+  try {
+    dbInstance.run('PRAGMA foreign_keys = ON;');
+  } catch (e) {
+    console.warn('Could not enable foreign keys pragma:', e);
+  }
   
   initializeSchema(dbInstance);
   return dbInstance;
@@ -60,6 +82,9 @@ export async function getDb(): Promise<Database> {
 export function saveDb(): void {
   if (!dbInstance) return;
   try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
     const data = dbInstance.export();
     const buffer = Buffer.from(data);
     fs.writeFileSync(DB_FILE, buffer);
@@ -142,11 +167,12 @@ function initializeSchema(db: Database): void {
       id TEXT PRIMARY KEY,
       home_id TEXT NOT NULL,
       name TEXT NOT NULL,
-      color TEXT NOT NULL,
-      icon TEXT NOT NULL,
+      color TEXT DEFAULT '#64748B',
+      icon TEXT DEFAULT 'Tag',
       is_default INTEGER DEFAULT 0,
       created_at TEXT NOT NULL,
-      FOREIGN KEY (home_id) REFERENCES homes(id) ON DELETE CASCADE
+      FOREIGN KEY (home_id) REFERENCES homes(id) ON DELETE CASCADE,
+      UNIQUE(home_id, name)
     );
 
     CREATE TABLE IF NOT EXISTS merchants (
@@ -157,68 +183,95 @@ function initializeSchema(db: Database): void {
       default_expense_type TEXT DEFAULT 'variable',
       created_at TEXT NOT NULL,
       FOREIGN KEY (home_id) REFERENCES homes(id) ON DELETE CASCADE,
-      FOREIGN KEY (default_category_id) REFERENCES categories(id) ON DELETE SET NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS recurring_expenses (
-      id TEXT PRIMARY KEY,
-      home_id TEXT NOT NULL,
-      merchant_id TEXT NOT NULL,
-      category_id TEXT NOT NULL,
-      name TEXT NOT NULL,
-      amount REAL NOT NULL,
-      frequency TEXT NOT NULL DEFAULT 'monthly',
-      due_day INTEGER NOT NULL,
-      start_date TEXT NOT NULL,
-      end_date TEXT,
-      is_active INTEGER NOT NULL DEFAULT 1,
-      notes TEXT,
-      created_at TEXT NOT NULL,
-      FOREIGN KEY (home_id) REFERENCES homes(id) ON DELETE CASCADE,
-      FOREIGN KEY (merchant_id) REFERENCES merchants(id) ON DELETE CASCADE,
-      FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
+      FOREIGN KEY (default_category_id) REFERENCES categories(id) ON DELETE SET NULL,
+      UNIQUE(home_id, name)
     );
 
     CREATE TABLE IF NOT EXISTS expenses (
       id TEXT PRIMARY KEY,
       home_id TEXT NOT NULL,
-      merchant_id TEXT NOT NULL,
-      category_id TEXT NOT NULL,
+      title TEXT NOT NULL,
       amount REAL NOT NULL,
-      description TEXT NOT NULL,
-      expense_type TEXT NOT NULL,
-      date TEXT NOT NULL,
-      paid_by_member_id TEXT,
-      recurring_expense_id TEXT,
+      expense_date TEXT NOT NULL,
+      category_id TEXT NOT NULL,
+      merchant_id TEXT,
+      expense_type TEXT NOT NULL DEFAULT 'variable',
+      frequency TEXT,
+      paid_by_member_id TEXT NOT NULL,
+      split_type TEXT NOT NULL DEFAULT 'equal',
       notes TEXT,
+      created_by_user_id TEXT NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       FOREIGN KEY (home_id) REFERENCES homes(id) ON DELETE CASCADE,
-      FOREIGN KEY (merchant_id) REFERENCES merchants(id) ON DELETE RESTRICT,
       FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE RESTRICT,
-      FOREIGN KEY (paid_by_member_id) REFERENCES home_members(id) ON DELETE SET NULL,
-      FOREIGN KEY (recurring_expense_id) REFERENCES recurring_expenses(id) ON DELETE SET NULL
+      FOREIGN KEY (merchant_id) REFERENCES merchants(id) ON DELETE SET NULL,
+      FOREIGN KEY (paid_by_member_id) REFERENCES home_members(id) ON DELETE RESTRICT,
+      FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE RESTRICT
     );
 
-    CREATE TABLE IF NOT EXISTS monthly_limits (
+    CREATE TABLE IF NOT EXISTS expense_splits (
+      id TEXT PRIMARY KEY,
+      expense_id TEXT NOT NULL,
+      member_id TEXT NOT NULL,
+      share_amount REAL NOT NULL,
+      percentage REAL,
+      exact_amount REAL,
+      is_settled INTEGER DEFAULT 0,
+      settled_at TEXT,
+      FOREIGN KEY (expense_id) REFERENCES expenses(id) ON DELETE CASCADE,
+      FOREIGN KEY (member_id) REFERENCES home_members(id) ON DELETE CASCADE,
+      UNIQUE(expense_id, member_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS settlements (
       id TEXT PRIMARY KEY,
       home_id TEXT NOT NULL,
-      category_id TEXT,
-      limit_amount REAL NOT NULL,
-      month TEXT,
-      alert_threshold REAL DEFAULT 80.0,
+      from_member_id TEXT NOT NULL,
+      to_member_id TEXT NOT NULL,
+      amount REAL NOT NULL,
+      settlement_date TEXT NOT NULL,
+      payment_method TEXT DEFAULT 'upi',
+      reference_id TEXT,
+      notes TEXT,
+      created_by_user_id TEXT NOT NULL,
       created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
+      FOREIGN KEY (home_id) REFERENCES homes(id) ON DELETE CASCADE,
+      FOREIGN KEY (from_member_id) REFERENCES home_members(id) ON DELETE RESTRICT,
+      FOREIGN KEY (to_member_id) REFERENCES home_members(id) ON DELETE RESTRICT,
+      FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE RESTRICT
+    );
+
+    CREATE TABLE IF NOT EXISTS budgets (
+      id TEXT PRIMARY KEY,
+      home_id TEXT NOT NULL,
+      month_year TEXT NOT NULL,
+      category_id TEXT,
+      budget_amount REAL NOT NULL,
+      created_at TEXT NOT NULL,
       FOREIGN KEY (home_id) REFERENCES homes(id) ON DELETE CASCADE,
       FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
     );
 
-    CREATE INDEX IF NOT EXISTS idx_expenses_home_date ON expenses(home_id, date);
-    CREATE INDEX IF NOT EXISTS idx_expenses_merchant ON expenses(merchant_id);
-    CREATE INDEX IF NOT EXISTS idx_expenses_category ON expenses(category_id);
-    CREATE INDEX IF NOT EXISTS idx_merchants_home ON merchants(home_id);
-    CREATE INDEX IF NOT EXISTS idx_recurring_home ON recurring_expenses(home_id);
-    CREATE INDEX IF NOT EXISTS idx_limits_home ON monthly_limits(home_id);
+    CREATE TABLE IF NOT EXISTS recurring_rules (
+      id TEXT PRIMARY KEY,
+      home_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      amount REAL NOT NULL,
+      category_id TEXT NOT NULL,
+      merchant_id TEXT,
+      expense_type TEXT NOT NULL DEFAULT 'fixed',
+      frequency TEXT NOT NULL DEFAULT 'monthly',
+      day_of_month INTEGER DEFAULT 1,
+      paid_by_member_id TEXT NOT NULL,
+      split_type TEXT NOT NULL DEFAULT 'equal',
+      is_active INTEGER DEFAULT 1,
+      last_generated_date TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (home_id) REFERENCES homes(id) ON DELETE CASCADE,
+      FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE RESTRICT,
+      FOREIGN KEY (merchant_id) REFERENCES merchants(id) ON DELETE SET NULL,
+      FOREIGN KEY (paid_by_member_id) REFERENCES home_members(id) ON DELETE RESTRICT
+    );
   `);
-  saveDb();
 }
