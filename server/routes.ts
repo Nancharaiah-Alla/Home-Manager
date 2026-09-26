@@ -5,7 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import { getDb, queryAll, queryOne, run, runTransaction } from './db';
 import { ensureDefaultCategoriesAndMerchants } from './seed';
-import firebaseConfig from '../firebase-applet-config.json';
+import firebaseConfig from './firebaseConfig';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'home-manager-secure-jwt-token-2026';
 

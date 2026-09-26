@@ -64,7 +64,7 @@ app.use(async (_req, res, next) => {
 app.use('/api', apiRouter);
 app.use('/', apiRouter);
 
-// Health check
+// Health check endpoints
 app.get('/api/health', (_req: Request, res: Response) => {
   res.json({
     status: 'healthy',
@@ -73,9 +73,13 @@ app.get('/api/health', (_req: Request, res: Response) => {
   });
 });
 
-// Export for Vercel Serverless Function runtime
-export default function handler(req: Request, res: Response) {
-  return app(req, res);
-}
+app.get('/health', (_req: Request, res: Response) => {
+  res.json({
+    status: 'healthy',
+    platform: 'vercel-serverless',
+    timestamp: new Date().toISOString(),
+  });
+});
 
-export { app };
+// Default Express export for Vercel Serverless Function runtime
+export default app;
