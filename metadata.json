@@ -1,0 +1,8 @@
+{
+  "name": "Home Manager",
+  "description": "Simple, modern household expense management for individuals and families to easily record, organize, understand, and control everyday spending.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
