@@ -1,10 +1,7 @@
 import initSqlJs, { Database } from 'sql.js';
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { SQL_WASM_BASE64 } from './sqlWasmBase64';
 
 const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
 const DATA_DIR = isServerless ? '/tmp/homemanager-data' : path.resolve(process.cwd(), 'data');
@@ -12,25 +9,6 @@ const DB_FILE = path.resolve(DATA_DIR, 'homemanager.sqlite');
 const SEED_SOURCE_FILE = path.resolve(process.cwd(), 'data/homemanager.sqlite');
 
 let dbInstance: Database | null = null;
-
-function getWasmBinary(): Buffer | null {
-  const candidates = [
-    path.resolve(__dirname, 'sql-wasm.wasm'),
-    path.resolve(process.cwd(), 'server/sql-wasm.wasm'),
-    path.resolve(process.cwd(), 'data/sql-wasm.wasm'),
-    path.resolve(process.cwd(), 'node_modules/sql.js/dist/sql-wasm.wasm'),
-  ];
-  for (const p of candidates) {
-    if (fs.existsSync(p)) {
-      try {
-        return fs.readFileSync(p);
-      } catch (e) {
-        console.warn(`Could not read wasm at ${p}:`, e);
-      }
-    }
-  }
-  return null;
-}
 
 export async function getDb(): Promise<Database> {
   if (dbInstance) return dbInstance;
@@ -52,12 +30,16 @@ export async function getDb(): Promise<Database> {
     }
   }
 
-  const wasmBinary = getWasmBinary();
-  const sqlConfig: Record<string, unknown> = {};
-  if (wasmBinary) {
-    sqlConfig.wasmBinary = wasmBinary.buffer.slice(wasmBinary.byteOffset, wasmBinary.byteOffset + wasmBinary.byteLength);
-  }
-  const SQL = await initSqlJs(sqlConfig);
+  // Decode the inlined WebAssembly binary so it works without any filesystem dependency
+  const wasmBuffer = Buffer.from(SQL_WASM_BASE64, 'base64');
+  const wasmArrayBuffer = wasmBuffer.buffer.slice(
+    wasmBuffer.byteOffset,
+    wasmBuffer.byteOffset + wasmBuffer.byteLength
+  );
+
+  const SQL = await initSqlJs({
+    wasmBinary: wasmArrayBuffer,
+  });
 
   let fileBuffer: Buffer | null = null;
   if (fs.existsSync(DB_FILE)) {

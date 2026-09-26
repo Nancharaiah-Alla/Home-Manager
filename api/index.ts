@@ -73,4 +73,9 @@ app.get('/api/health', (_req: Request, res: Response) => {
   });
 });
 
-export default app;
+// Export for Vercel Serverless Function runtime
+export default function handler(req: Request, res: Response) {
+  return app(req, res);
+}
+
+export { app };
