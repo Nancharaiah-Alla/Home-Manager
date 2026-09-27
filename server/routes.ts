@@ -161,14 +161,31 @@ export function verifyHomeAccess(req: AuthRequest, res: Response, next: NextFunc
     return;
   }
 
-  const membership = queryOne<{ role: string; id: string }>(
+  let membership = queryOne<{ role: string; id: string }>(
     'SELECT id, role FROM home_members WHERE home_id = ? AND user_id = ?',
     [homeId, req.userId!]
   );
 
   if (!membership) {
-    res.status(403).json({ error: 'Access denied: You are not a member of this household' });
-    return;
+    const existingHome = queryOne<{ id: string }>('SELECT id FROM homes WHERE id = ?', [homeId]);
+    if (!existingHome && req.userId) {
+      const user = queryOne<{ name: string }>('SELECT name FROM users WHERE id = ?', [req.userId]);
+      const homeName = user?.name ? `${user.name}'s Home` : 'My Home';
+      const now = new Date().toISOString();
+      run(
+        'INSERT INTO homes (id, name, currency_symbol, currency_code, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+        [homeId, homeName, '₹', 'INR', now, now]
+      );
+      run(
+        'INSERT INTO home_members (id, home_id, user_id, role, created_at) VALUES (?, ?, ?, ?, ?)',
+        ['mem_' + Math.random().toString(36).substring(2, 10), homeId, req.userId, 'admin', now]
+      );
+      ensureDefaultCategoriesAndMerchants(homeId);
+      membership = { role: 'admin', id: 'auto' };
+    } else {
+      res.status(403).json({ error: 'Access denied: You are not a member of this household' });
+      return;
+    }
   }
 
   req.homeId = homeId;

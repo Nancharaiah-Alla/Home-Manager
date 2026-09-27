@@ -31181,13 +31181,30 @@ function verifyHomeAccess(req, res, next) {
     res.status(400).json({ error: "Home ID is required" });
     return;
   }
-  const membership = queryOne(
+  let membership = queryOne(
     "SELECT id, role FROM home_members WHERE home_id = ? AND user_id = ?",
     [homeId, req.userId]
   );
   if (!membership) {
-    res.status(403).json({ error: "Access denied: You are not a member of this household" });
-    return;
+    const existingHome = queryOne("SELECT id FROM homes WHERE id = ?", [homeId]);
+    if (!existingHome && req.userId) {
+      const user = queryOne("SELECT name FROM users WHERE id = ?", [req.userId]);
+      const homeName = user?.name ? `${user.name}'s Home` : "My Home";
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      run(
+        "INSERT INTO homes (id, name, currency_symbol, currency_code, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        [homeId, homeName, "\u20B9", "INR", now, now]
+      );
+      run(
+        "INSERT INTO home_members (id, home_id, user_id, role, created_at) VALUES (?, ?, ?, ?, ?)",
+        ["mem_" + Math.random().toString(36).substring(2, 10), homeId, req.userId, "admin", now]
+      );
+      ensureDefaultCategoriesAndMerchants(homeId);
+      membership = { role: "admin", id: "auto" };
+    } else {
+      res.status(403).json({ error: "Access denied: You are not a member of this household" });
+      return;
+    }
   }
   req.homeId = homeId;
   next();
@@ -32269,34 +32286,21 @@ app.use((req, res, next) => {
   }
   next();
 });
-var initPromise = null;
-async function ensureServerlessDb() {
-  if (!initPromise) {
-    initPromise = (async () => {
-      await getDb();
-      try {
-        seedDemoHouseholdIfEmpty();
-      } catch (seedErr) {
-        console.warn("Seed demo check encountered error:", seedErr);
-      }
-    })();
+app.use((req, _res, next) => {
+  const forwardedUri = req.headers["x-forwarded-uri"];
+  const matchedPath = req.headers["x-matched-path"];
+  const originalUrlHeader = req.headers["x-original-url"];
+  if (req.query && typeof req.query.path === "string") {
+    req.url = "/api/" + req.query.path;
+  } else if (forwardedUri && forwardedUri.startsWith("/api")) {
+    req.url = forwardedUri;
+  } else if (matchedPath && matchedPath.startsWith("/api")) {
+    req.url = matchedPath;
+  } else if (originalUrlHeader && originalUrlHeader.startsWith("/api")) {
+    req.url = originalUrlHeader;
   }
-  return initPromise;
-}
-app.use(async (_req, res, next) => {
-  try {
-    await ensureServerlessDb();
-    next();
-  } catch (err) {
-    console.error("Database initialization error in Vercel serverless function:", err);
-    initPromise = null;
-    res.status(500).json({
-      error: "Database failed to initialize: " + (err instanceof Error ? err.message : String(err))
-    });
-  }
+  next();
 });
-app.use("/api", apiRouter);
-app.use("/", apiRouter);
 app.get("/api/health", (_req, res) => {
   res.json({
     status: "healthy",
@@ -32311,9 +32315,73 @@ app.get("/health", (_req, res) => {
     timestamp: (/* @__PURE__ */ new Date()).toISOString()
   });
 });
-var serverless_default = app;
+app.get("/api", (_req, res) => {
+  res.json({
+    status: "healthy",
+    message: "Home Manager API is live",
+    timestamp: (/* @__PURE__ */ new Date()).toISOString()
+  });
+});
+var initPromise = null;
+async function ensureServerlessDb() {
+  if (!initPromise) {
+    initPromise = (async () => {
+      try {
+        await getDb();
+        try {
+          seedDemoHouseholdIfEmpty();
+        } catch (seedErr) {
+          console.warn("Seed demo check encountered error:", seedErr);
+        }
+      } catch (dbErr) {
+        console.error("Fatal DB init error:", dbErr);
+        initPromise = null;
+        throw dbErr;
+      }
+    })();
+  }
+  return initPromise;
+}
+app.use(async (_req, res, next) => {
+  try {
+    await ensureServerlessDb();
+    next();
+  } catch (err) {
+    console.error("Database initialization error in Vercel serverless function:", err);
+    res.status(500).json({
+      error: "Database failed to initialize: " + (err instanceof Error ? err.message : String(err))
+    });
+  }
+});
+app.use("/api", apiRouter);
+app.use("/", apiRouter);
+app.use((req, res) => {
+  res.status(404).json({
+    error: `Route not found: ${req.method} ${req.url}`
+  });
+});
+app.use((err, _req, res, _next) => {
+  console.error("Unhandled server error:", err);
+  if (!res.headersSent) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : "Internal Server Error"
+    });
+  }
+});
+async function handler(req, res) {
+  try {
+    return app(req, res);
+  } catch (err) {
+    console.error("Fatal error in serverless handler:", err);
+    if (!res.headersSent) {
+      res.statusCode = 500;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: String(err) }));
+    }
+  }
+}
 export {
-  serverless_default as default
+  handler as default
 };
 /*! Bundled license information:
 

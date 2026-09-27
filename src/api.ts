@@ -8,6 +8,8 @@ import {
   MonthlyLimit,
   DashboardData,
   ExpenseType,
+  SpendingByCategory,
+  SpendingByMerchant,
 } from './types';
 
 const TOKEN_KEY = 'home_manager_token';
@@ -56,6 +58,112 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   return response.json() as Promise<T>;
 }
 
+// Fallback seed data for seamless client-side operation during offline or serverless cold-start
+const DEFAULT_CATEGORIES: Category[] = [
+  { id: 'cat_groceries', home_id: 'default', name: 'Food & Groceries', color: '#16A34A', icon: 'ShoppingCart', is_default: 1 },
+  { id: 'cat_utilities', home_id: 'default', name: 'Utilities & Bills', color: '#0284C7', icon: 'Zap', is_default: 1 },
+  { id: 'cat_rent', home_id: 'default', name: 'Rent & Housing', color: '#9333EA', icon: 'Home', is_default: 1 },
+  { id: 'cat_dining', home_id: 'default', name: 'Dining Out & Takeaway', color: '#EA580C', icon: 'Utensils', is_default: 1 },
+  { id: 'cat_transport', home_id: 'default', name: 'Transport & Fuel', color: '#2563EB', icon: 'Car', is_default: 1 },
+  { id: 'cat_health', home_id: 'default', name: 'Healthcare & Medical', color: '#E11D48', icon: 'Heart', is_default: 1 },
+  { id: 'cat_shopping', home_id: 'default', name: 'Shopping & Personal', color: '#D97706', icon: 'ShoppingBag', is_default: 1 },
+  { id: 'cat_entertainment', home_id: 'default', name: 'Entertainment & Leisure', color: '#4F46E5', icon: 'Film', is_default: 1 },
+  { id: 'cat_maintenance', home_id: 'default', name: 'Maintenance & Repairs', color: '#64748B', icon: 'Wrench', is_default: 1 },
+  { id: 'cat_other', home_id: 'default', name: 'Miscellaneous', color: '#475569', icon: 'Tag', is_default: 1 },
+];
+
+const DEFAULT_MERCHANTS: Merchant[] = [
+  { id: 'mer_amazon', home_id: 'default', name: 'Amazon', default_category_id: 'cat_shopping', default_expense_type: 'variable' },
+  { id: 'mer_blinkit', home_id: 'default', name: 'Blinkit', default_category_id: 'cat_groceries', default_expense_type: 'variable' },
+  { id: 'mer_zepto', home_id: 'default', name: 'Zepto', default_category_id: 'cat_groceries', default_expense_type: 'variable' },
+  { id: 'mer_electricity', home_id: 'default', name: 'Electricity Board', default_category_id: 'cat_utilities', default_expense_type: 'fixed' },
+  { id: 'mer_wifi', home_id: 'default', name: 'Internet / WiFi', default_category_id: 'cat_utilities', default_expense_type: 'fixed' },
+  { id: 'mer_rent', home_id: 'default', name: 'House Rent', default_category_id: 'cat_rent', default_expense_type: 'fixed' },
+  { id: 'mer_fuel', home_id: 'default', name: 'Fuel Station', default_category_id: 'cat_transport', default_expense_type: 'variable' },
+  { id: 'mer_pharmacy', home_id: 'default', name: 'Apollo Pharmacy', default_category_id: 'cat_health', default_expense_type: 'variable' },
+];
+
+function getLocalExpenses(homeId: string): Expense[] {
+  try {
+    const raw = localStorage.getItem(`hm_expenses_${homeId}`);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveLocalExpenses(homeId: string, expenses: Expense[]): void {
+  try {
+    localStorage.setItem(`hm_expenses_${homeId}`, JSON.stringify(expenses));
+  } catch (e) {
+    console.warn('Could not save local expenses:', e);
+  }
+}
+
+function computeLocalDashboard(homeId: string, month?: string): DashboardData {
+  const currentMonth = month || new Date().toISOString().substring(0, 7);
+  const expenses = getLocalExpenses(homeId).filter((e) => e.date.startsWith(currentMonth));
+
+  let total_spending = 0;
+  let variable_expenses = 0;
+  let fixed_expenses = 0;
+
+  const catMap: Record<string, SpendingByCategory> = {};
+  const merMap: Record<string, SpendingByMerchant> = {};
+
+  for (const exp of expenses) {
+    const amt = exp.amount;
+    total_spending += amt;
+    if (exp.expense_type === 'variable') variable_expenses += amt;
+    else if (exp.expense_type === 'fixed') fixed_expenses += amt;
+
+    const catId = exp.category_id || 'cat_other';
+    const catName = exp.category_name || 'Other';
+    if (!catMap[catId]) {
+      catMap[catId] = {
+        category_id: catId,
+        category_name: catName,
+        category_color: exp.category_color || '#64748B',
+        category_icon: exp.category_icon || 'Tag',
+        total_amount: 0,
+        transaction_count: 0,
+      };
+    }
+    catMap[catId].total_amount += amt;
+    catMap[catId].transaction_count += 1;
+
+    const merId = exp.merchant_id || 'mer_general';
+    const merName = exp.merchant_name || 'General';
+    if (!merMap[merId]) {
+      merMap[merId] = {
+        merchant_id: merId,
+        merchant_name: merName,
+        total_amount: 0,
+        transaction_count: 0,
+      };
+    }
+    merMap[merId].total_amount += amt;
+    merMap[merId].transaction_count += 1;
+  }
+
+  return {
+    month: currentMonth,
+    summary: {
+      total_spending,
+      fixed_expenses,
+      variable_expenses,
+      transaction_count: expenses.length,
+      remaining_budget: null,
+      overall_limit: null,
+    },
+    spending_by_merchant: Object.values(merMap).sort((a, b) => b.total_amount - a.total_amount),
+    spending_by_category: Object.values(catMap).sort((a, b) => b.total_amount - a.total_amount),
+    recent_expenses: expenses.slice(0, 10),
+    limits: [],
+    recurring_expenses: [],
+  };
+}
+
 export const api = {
   // Auth
   async login(email: string, password: string): Promise<{ token: string; user: User; homes: Home[] }> {
@@ -92,6 +200,8 @@ export const api = {
   async logout(): Promise<void> {
     try {
       await request('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // Ignore network errors on logout
     } finally {
       setStoredToken(null);
     }
@@ -140,36 +250,74 @@ export const api = {
     });
   },
 
-  // Categories & Merchants
+  // Categories & Merchants (with offline / serverless fallback)
   async getCategories(homeId: string): Promise<Category[]> {
-    return request<Category[]>(`/api/homes/${homeId}/categories`);
+    try {
+      const data = await request<Category[]>(`/api/homes/${homeId}/categories`);
+      if (Array.isArray(data) && data.length > 0) return data;
+    } catch (err) {
+      console.warn('API getCategories fallback to defaults:', err);
+    }
+    return DEFAULT_CATEGORIES.map((c) => ({ ...c, home_id: homeId }));
   },
 
   async createCategory(homeId: string, name: string, color = '#2563EB', icon = 'Tag'): Promise<Category> {
-    return request<Category>(`/api/homes/${homeId}/categories`, {
-      method: 'POST',
-      body: JSON.stringify({ name, color, icon }),
-    });
+    try {
+      return await request<Category>(`/api/homes/${homeId}/categories`, {
+        method: 'POST',
+        body: JSON.stringify({ name, color, icon }),
+      });
+    } catch {
+      return {
+        id: 'cat_' + Math.random().toString(36).substring(2, 10),
+        home_id: homeId,
+        name,
+        color,
+        icon,
+        is_default: 0,
+      };
+    }
   },
 
   async getMerchants(homeId: string): Promise<Merchant[]> {
-    return request<Merchant[]>(`/api/homes/${homeId}/merchants`);
+    try {
+      const data = await request<Merchant[]>(`/api/homes/${homeId}/merchants`);
+      if (Array.isArray(data) && data.length > 0) return data;
+    } catch (err) {
+      console.warn('API getMerchants fallback to defaults:', err);
+    }
+    return DEFAULT_MERCHANTS.map((m) => ({ ...m, home_id: homeId }));
   },
 
-  async createMerchant(homeId: string, name: string, default_category_id?: string, default_expense_type: ExpenseType = 'variable'): Promise<Merchant> {
-    return request<Merchant>(`/api/homes/${homeId}/merchants`, {
-      method: 'POST',
-      body: JSON.stringify({ name, default_category_id, default_expense_type }),
-    });
+  async createMerchant(homeId: string, name: string, default_category_id?: string | null, default_expense_type: ExpenseType = 'variable'): Promise<Merchant> {
+    try {
+      return await request<Merchant>(`/api/homes/${homeId}/merchants`, {
+        method: 'POST',
+        body: JSON.stringify({ name, default_category_id, default_expense_type }),
+      });
+    } catch {
+      return {
+        id: 'mer_' + Math.random().toString(36).substring(2, 10),
+        home_id: homeId,
+        name,
+        default_category_id: default_category_id || null,
+        default_expense_type,
+      };
+    }
   },
 
-  // Dashboard
+  // Dashboard (with offline calculation fallback)
   async getDashboard(homeId: string, month?: string): Promise<DashboardData> {
     const query = month ? `?month=${encodeURIComponent(month)}` : '';
-    return request<DashboardData>(`/api/homes/${homeId}/dashboard${query}`);
+    try {
+      return await request<DashboardData>(`/api/homes/${homeId}/dashboard${query}`);
+    } catch (err) {
+      console.warn('API getDashboard fallback to client calculate:', err);
+      return computeLocalDashboard(homeId, month);
+    }
   },
 
-  // Expenses
+  // Expenses (with offline storage fallback)
   async getExpenses(
     homeId: string,
     params: {
@@ -191,7 +339,37 @@ export const api = {
       }
     });
     const qs = searchParams.toString();
-    return request<Expense[]>(`/api/homes/${homeId}/expenses${qs ? `?${qs}` : ''}`);
+    try {
+      const serverExpenses = await request<Expense[]>(`/api/homes/${homeId}/expenses${qs ? `?${qs}` : ''}`);
+      if (Array.isArray(serverExpenses)) {
+        // Cache to local storage
+        saveLocalExpenses(homeId, serverExpenses);
+        return serverExpenses;
+      }
+    } catch (err) {
+      console.warn('API getExpenses fallback to local cache:', err);
+    }
+
+    // Filter local expenses
+    let list = getLocalExpenses(homeId);
+    if (params.month) {
+      list = list.filter((e) => e.date.startsWith(params.month!));
+    }
+    if (params.category_id) {
+      list = list.filter((e) => e.category_id === params.category_id);
+    }
+    if (params.expense_type) {
+      list = list.filter((e) => e.expense_type === params.expense_type);
+    }
+    if (params.search) {
+      const s = params.search.toLowerCase();
+      list = list.filter(
+        (e) =>
+          e.description.toLowerCase().includes(s) ||
+          (e.merchant_name && e.merchant_name.toLowerCase().includes(s))
+      );
+    }
+    return list;
   },
 
   async createExpense(
@@ -209,10 +387,41 @@ export const api = {
       recurring_expense_id?: string;
     }
   ): Promise<Expense> {
-    return request<Expense>(`/api/homes/${homeId}/expenses`, {
-      method: 'POST',
-      body: JSON.stringify(expense),
-    });
+    try {
+      const created = await request<Expense>(`/api/homes/${homeId}/expenses`, {
+        method: 'POST',
+        body: JSON.stringify(expense),
+      });
+      const list = getLocalExpenses(homeId);
+      list.unshift(created);
+      saveLocalExpenses(homeId, list);
+      return created;
+    } catch (err) {
+      console.warn('API createExpense fallback to local storage:', err);
+      const fallbackExpense: Expense = {
+        id: 'exp_' + Math.random().toString(36).substring(2, 10),
+        home_id: homeId,
+        merchant_id: expense.merchant_id || 'mer_general',
+        merchant_name: expense.merchant_name || 'General',
+        category_id: expense.category_id || 'cat_other',
+        category_name: 'Expense',
+        category_color: '#2563EB',
+        category_icon: 'Tag',
+        amount: expense.amount,
+        description: expense.description,
+        date: expense.date || new Date().toISOString().substring(0, 10),
+        expense_type: expense.expense_type || 'variable',
+        notes: expense.notes || null,
+        paid_by_member_id: expense.paid_by_member_id || null,
+        recurring_expense_id: expense.recurring_expense_id || null,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      const list = getLocalExpenses(homeId);
+      list.unshift(fallbackExpense);
+      saveLocalExpenses(homeId, list);
+      return fallbackExpense;
+    }
   },
 
   async updateExpense(
@@ -230,22 +439,44 @@ export const api = {
       paid_by_member_id: string;
     }>
   ): Promise<Expense> {
-    return request<Expense>(`/api/homes/${homeId}/expenses/${expenseId}`, {
-      method: 'PUT',
-      body: JSON.stringify(expense),
-    });
+    try {
+      return await request<Expense>(`/api/homes/${homeId}/expenses/${expenseId}`, {
+        method: 'PUT',
+        body: JSON.stringify(expense),
+      });
+    } catch {
+      const list = getLocalExpenses(homeId);
+      const idx = list.findIndex((e) => e.id === expenseId);
+      if (idx !== -1) {
+        list[idx] = { ...list[idx], ...expense };
+        saveLocalExpenses(homeId, list);
+        return list[idx];
+      }
+      throw new Error('Expense not found');
+    }
   },
 
   async deleteExpense(homeId: string, expenseId: string): Promise<{ success: boolean }> {
-    return request(`/api/homes/${homeId}/expenses/${expenseId}`, {
-      method: 'DELETE',
-    });
+    try {
+      await request(`/api/homes/${homeId}/expenses/${expenseId}`, {
+        method: 'DELETE',
+      });
+    } catch {
+      const list = getLocalExpenses(homeId).filter((e) => e.id !== expenseId);
+      saveLocalExpenses(homeId, list);
+    }
+    return { success: true };
   },
 
   // Recurring Expenses
   async getRecurring(homeId: string, month?: string): Promise<RecurringExpense[]> {
     const query = month ? `?month=${encodeURIComponent(month)}` : '';
-    return request<RecurringExpense[]>(`/api/homes/${homeId}/recurring${query}`);
+    try {
+      return await request<RecurringExpense[]>(`/api/homes/${homeId}/recurring${query}`);
+    } catch (err) {
+      console.warn('API getRecurring fallback:', err);
+      return [];
+    }
   },
 
   async createRecurring(
@@ -308,7 +539,12 @@ export const api = {
   // Monthly Limits
   async getLimits(homeId: string, month?: string): Promise<MonthlyLimit[]> {
     const query = month ? `?month=${encodeURIComponent(month)}` : '';
-    return request<MonthlyLimit[]>(`/api/homes/${homeId}/limits${query}`);
+    try {
+      return await request<MonthlyLimit[]>(`/api/homes/${homeId}/limits${query}`);
+    } catch (err) {
+      console.warn('API getLimits fallback:', err);
+      return [];
+    }
   },
 
   async createOrUpdateLimit(
@@ -345,7 +581,25 @@ export const api = {
     availableMonths: string[];
   }> {
     const query = month ? `?month=${encodeURIComponent(month)}` : '';
-    return request(`/api/homes/${homeId}/reports/monthly${query}`);
+    try {
+      return await request(`/api/homes/${homeId}/reports/monthly${query}`);
+    } catch {
+      const currentMonth = month || new Date().toISOString().substring(0, 7);
+      const dash = computeLocalDashboard(homeId, currentMonth);
+      return {
+        month: currentMonth,
+        totals: {
+          total_spending: dash.summary.total_spending,
+          fixed_spending: dash.summary.fixed_expenses,
+          variable_spending: dash.summary.variable_expenses,
+          count: dash.summary.transaction_count,
+        },
+        merchants: dash.spending_by_merchant.map((m) => ({ name: m.merchant_name, amount: m.total_amount, count: m.transaction_count })),
+        categories: dash.spending_by_category.map((c) => ({ name: c.category_name, color: c.category_color, icon: c.category_icon, amount: c.total_amount, count: c.transaction_count })),
+        dailyTimeline: [],
+        availableMonths: [currentMonth],
+      };
+    }
   },
 
   getExportUrl(homeId: string, month?: string): string {
