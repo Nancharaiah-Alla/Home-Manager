@@ -87,9 +87,14 @@ export async function signInWithGoogleOAuth(): Promise<GoogleAuthResult> {
       );
     }
 
-    // If popup is blocked by the browser, fallback to redirect flow
-    if (error.code === 'auth/popup-blocked') {
-      console.warn('Popup blocked, attempting redirect flow to Google...');
+    // If popup is blocked by the browser or interrupted by cross-origin opener policy, fallback to redirect flow
+    if (
+      error.code === 'auth/popup-blocked' ||
+      error.code === 'auth/cancelled-popup-request' ||
+      error.message?.includes('Cross-Origin-Opener-Policy') ||
+      error.message?.includes('window.closed')
+    ) {
+      console.warn('Popup blocked or affected by cross-origin policy, switching to redirect flow...');
       await signInWithRedirect(auth, provider);
       throw new Error('Redirecting to Google for account selection...');
     }

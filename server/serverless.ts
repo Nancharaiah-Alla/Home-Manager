@@ -1,8 +1,8 @@
 import express, { Request, Response } from 'express';
 import cookieParser from 'cookie-parser';
-import { getDb } from '../server/db';
-import { seedDemoHouseholdIfEmpty } from '../server/seed';
-import { apiRouter } from '../server/routes';
+import { getDb } from './db';
+import { seedDemoHouseholdIfEmpty } from './seed';
+import { apiRouter } from './routes';
 
 const app = express();
 
@@ -11,7 +11,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-// Enable CORS and popups for OAuth window.close compatibility
+// Enable CORS and allow OAuth popups without cross-origin policy restrictions
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (origin) {
@@ -22,7 +22,7 @@ app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
+  res.setHeader('Cross-Origin-Opener-Policy', 'unsafe-none');
 
   if (req.method === 'OPTIONS') {
     res.sendStatus(204);
@@ -81,5 +81,4 @@ app.get('/health', (_req: Request, res: Response) => {
   });
 });
 
-// Default Express export for Vercel Serverless Function runtime
 export default app;

@@ -6,16 +6,12 @@
       "headers": [
         {
           "key": "Cross-Origin-Opener-Policy",
-          "value": "same-origin-allow-popups"
+          "value": "unsafe-none"
         }
       ]
     }
   ],
   "rewrites": [
-    {
-      "source": "/api",
-      "destination": "/api"
-    },
     {
       "source": "/api/(.*)",
       "destination": "/api"
