@@ -1,13 +1,52 @@
 export type ExpenseType = 'fixed' | 'variable';
-export type MemberRole = 'admin' | 'member' | 'viewer';
+export type MemberRole = 'admin' | 'editor' | 'viewer' | 'member';
 export type RecurringFrequency = 'monthly' | 'weekly' | 'quarterly' | 'yearly';
 
 export interface User {
   id: string;
   email: string;
+  phone?: string;
   name: string;
   avatar_color: string;
+  active_device_name?: string;
 }
+
+export interface PhoneVerifyResponse {
+  success?: boolean;
+  conflict?: boolean;
+  conflictToken?: string;
+  currentDevice?: string;
+  message?: string;
+  token?: string;
+  user?: User;
+  homes?: Home[];
+  isNewUser?: boolean;
+}
+
+export interface SetupMemberInput {
+  name: string;
+  phone?: string;
+  email?: string;
+  role: 'editor' | 'viewer';
+}
+
+export interface PurchaseRequest {
+  id: string;
+  home_id: string;
+  item_name: string;
+  estimated_amount?: number | null;
+  notes?: string | null;
+  requested_by_member_id: string;
+  requested_by_name?: string;
+  requested_by_nickname?: string;
+  requester_role?: string;
+  status: 'pending' | 'accepted' | 'rejected';
+  accepted_by_name?: string | null;
+  expense_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 
 export interface Home {
   id: string;

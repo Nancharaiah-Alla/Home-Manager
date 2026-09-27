@@ -255,5 +255,90 @@ function initializeSchema(db: Database): void {
       FOREIGN KEY (merchant_id) REFERENCES merchants(id) ON DELETE SET NULL,
       FOREIGN KEY (paid_by_member_id) REFERENCES home_members(id) ON DELETE RESTRICT
     );
+
+    CREATE TABLE IF NOT EXISTS user_sessions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      device_id TEXT,
+      device_name TEXT,
+      ip_address TEXT,
+      user_agent TEXT,
+      status TEXT NOT NULL DEFAULT 'active', -- 'active' | 'revoked' | 'logged_out'
+      created_at TEXT NOT NULL,
+      last_active_at TEXT NOT NULL,
+      revoked_at TEXT,
+      revoked_reason TEXT,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS phone_otp_verifications (
+      id TEXT PRIMARY KEY,
+      phone TEXT NOT NULL,
+      otp_code TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      attempts INTEGER DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS session_conflict_requests (
+      id TEXT PRIMARY KEY,
+      conflict_token TEXT UNIQUE NOT NULL,
+      user_id TEXT NOT NULL,
+      phone TEXT NOT NULL,
+      target_device_id TEXT,
+      target_device_name TEXT,
+      current_device_name TEXT,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS purchase_requests (
+      id TEXT PRIMARY KEY,
+      home_id TEXT NOT NULL,
+      item_name TEXT NOT NULL,
+      estimated_amount REAL,
+      notes TEXT,
+      requested_by_member_id TEXT NOT NULL,
+      requested_by_name TEXT,
+      status TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'accepted' | 'rejected'
+      accepted_by_name TEXT,
+      expense_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (home_id) REFERENCES homes(id) ON DELETE CASCADE,
+      FOREIGN KEY (requested_by_member_id) REFERENCES home_members(id) ON DELETE CASCADE
+    );
   `);
+
+  // Run non-destructive column migrations for existing databases
+  try {
+    db.run(`ALTER TABLE users ADD COLUMN phone TEXT;`);
+  } catch {
+    // Column already exists
+  }
+  try {
+    db.run(`ALTER TABLE users ADD COLUMN active_session_id TEXT;`);
+  } catch {
+    // Column already exists
+  }
+  try {
+    db.run(`ALTER TABLE users ADD COLUMN active_device_name TEXT;`);
+  } catch {
+    // Column already exists
+  }
+  try {
+    db.run(`ALTER TABLE users ADD COLUMN session_created_at TEXT;`);
+  } catch {
+    // Column already exists
+  }
+  try {
+    db.run(`ALTER TABLE home_members ADD COLUMN phone TEXT;`);
+  } catch {
+    // Column already exists
+  }
+  try {
+    db.run(`ALTER TABLE home_members ADD COLUMN email TEXT;`);
+  } catch {
+    // Column already exists
+  }
 }

@@ -1,11 +1,7 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
-import { User, Home } from '../types';
+import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback, useRef } from 'react';
+import { User, Home, PhoneVerifyResponse, SetupMemberInput, HomeMember } from '../types';
 import { api, getStoredToken, setStoredToken } from '../api';
-import {
-  signInWithGoogleOAuth,
-  checkGoogleRedirectResult,
-  signOutGoogle,
-} from '../utils/firebaseAuth';
+import { getDeviceId, getDeviceName } from '../utils/device';
 
 interface AuthContextType {
   user: User | null;
@@ -13,10 +9,20 @@ interface AuthContextType {
   activeHome: Home | null;
   loading: boolean;
   currencySymbol: string;
+  deviceId: string;
+  deviceName: string;
+  sessionRevokedMessage: string | null;
+  clearSessionRevokedMessage: () => void;
   setActiveHomeId: (id: string) => void;
-  login: (email: string, pass: string) => Promise<void>;
-  loginGoogle: () => Promise<void>;
-  register: (email: string, pass: string, name: string, homeName?: string) => Promise<void>;
+  sendPhoneOtp: (phone: string) => Promise<{ success: boolean; message: string; devOtp?: string; isExistingUser?: boolean; existingName?: string }>;
+  verifyPhoneOtp: (phone: string, otp: string, name?: string) => Promise<PhoneVerifyResponse>;
+  resolvePhoneConflict: (conflictToken: string, action: 'continue' | 'cancel') => Promise<{ success?: boolean; cancelled?: boolean; message?: string }>;
+  setupNewHome: (payload: {
+    homeName: string;
+    currencySymbol?: string;
+    currencyCode?: string;
+    members?: SetupMemberInput[];
+  }) => Promise<{ success: boolean; home: Home; members: HomeMember[] }>;
   updateProfile: (name: string, avatar_color?: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshMe: () => Promise<void>;
@@ -32,6 +38,24 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     return localStorage.getItem('home_manager_active_home_id');
   });
   const [loading, setLoading] = useState<boolean>(true);
+  const [sessionRevokedMessage, setSessionRevokedMessage] = useState<string | null>(null);
+
+  const deviceId = getDeviceId();
+  const deviceName = getDeviceName();
+
+  const clearSessionRevokedMessage = () => {
+    setSessionRevokedMessage(null);
+  };
+
+  const handleRevocation = useCallback((msg?: string) => {
+    const message = msg || 'You have been logged out because your account was signed in on another device.';
+    setStoredToken(null);
+    setUser(null);
+    setHomes([]);
+    setActiveHomeIdState(null);
+    localStorage.removeItem('home_manager_active_home_id');
+    setSessionRevokedMessage(message);
+  }, []);
 
   const refreshMe = useCallback(async () => {
     try {
@@ -40,7 +64,6 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       setHomes(data.homes);
 
       if (data.homes && data.homes.length > 0) {
-        // If current activeHomeId isn't valid, select first
         const exists = data.homes.find((h) => h.id === activeHomeId);
         if (!exists) {
           const firstId = data.homes[0].id;
@@ -48,57 +71,72 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           localStorage.setItem('home_manager_active_home_id', firstId);
         }
       }
-    } catch {
-      setUser(null);
-      setHomes([]);
+    } catch (err: unknown) {
+      if ((err as { isSessionRevoked?: boolean })?.isSessionRevoked) {
+        handleRevocation();
+      } else {
+        setUser(null);
+        setHomes([]);
+      }
     } finally {
       setLoading(false);
     }
-  }, [activeHomeId]);
+  }, [activeHomeId, handleRevocation]);
 
+  // Listen for global custom event dispatched from api.ts on 401 SESSION_REVOKED
+  useEffect(() => {
+    const onRevokedEvent = (e: Event) => {
+      const customEvent = e as CustomEvent<{ message?: string }>;
+      handleRevocation(customEvent.detail?.message);
+    };
+
+    window.addEventListener('hm:session-revoked', onRevokedEvent);
+    return () => {
+      window.removeEventListener('hm:session-revoked', onRevokedEvent);
+    };
+  }, [handleRevocation]);
+
+  // Periodic heartbeat session checking (every 3.5 seconds)
+  const isCheckingSessionRef = useRef(false);
+  useEffect(() => {
+    if (!user) return;
+
+    const checkSession = async () => {
+      if (isCheckingSessionRef.current) return;
+      isCheckingSessionRef.current = true;
+      try {
+        await api.checkSessionStatus();
+      } catch (err: unknown) {
+        if ((err as { isSessionRevoked?: boolean })?.isSessionRevoked) {
+          handleRevocation((err as Error).message);
+        }
+      } finally {
+        isCheckingSessionRef.current = false;
+      }
+    };
+
+    const interval = setInterval(checkSession, 3500);
+
+    // Also check immediately when window gains focus or tab becomes visible
+    const onVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible') {
+        checkSession();
+      }
+    };
+
+    window.addEventListener('focus', onVisibilityOrFocus);
+    document.addEventListener('visibilitychange', onVisibilityOrFocus);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', onVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', onVisibilityOrFocus);
+    };
+  }, [user, handleRevocation]);
+
+  // Initial Auth Check
   useEffect(() => {
     const handleInitialAuth = async () => {
-      // 1. Check if returning from a Google OAuth redirect
-      try {
-        const redirectCred = await checkGoogleRedirectResult();
-        if (redirectCred) {
-          try {
-            const res = await api.loginGoogle(redirectCred);
-            setUser(res.user);
-            setHomes(res.homes);
-            if (res.homes && res.homes.length > 0) {
-              setActiveHomeId(res.homes[0].id);
-            }
-          } catch (syncErr) {
-            console.warn('Backend server sync error on redirect, creating client session:', syncErr);
-            const fallbackUserId = 'usr_' + Math.random().toString(36).substring(2, 10);
-            const fallbackHomeId = 'home_' + Math.random().toString(36).substring(2, 10);
-            const displayName = redirectCred.name || redirectCred.email.split('@')[0];
-            const fallbackUser: User = {
-              id: fallbackUserId,
-              email: redirectCred.email,
-              name: displayName,
-              avatar_color: '#0284C7',
-            };
-            const fallbackHome: Home = {
-              id: fallbackHomeId,
-              name: `${displayName}'s Home`,
-              currency_symbol: '₹',
-              currency_code: 'INR',
-              role: 'admin',
-            };
-            setUser(fallbackUser);
-            setHomes([fallbackHome]);
-            setActiveHomeId(fallbackHomeId);
-          }
-          setLoading(false);
-          return;
-        }
-      } catch (err) {
-        console.warn('Redirect auth check completed with error:', err);
-      }
-
-      // 2. Check existing token
       const token = getStoredToken();
       if (token) {
         refreshMe();
@@ -115,70 +153,71 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     localStorage.setItem('home_manager_active_home_id', id);
   };
 
-  const login = async (email: string, pass: string) => {
-    setLoading(true);
-    try {
-      const res = await api.login(email, pass);
-      setUser(res.user);
-      setHomes(res.homes);
-      if (res.homes && res.homes.length > 0) {
-        setActiveHomeId(res.homes[0].id);
-      }
-    } finally {
-      setLoading(false);
-    }
+  const sendPhoneOtp = async (phone: string) => {
+    return api.sendPhoneOtp(phone);
   };
 
-  const loginGoogle = async () => {
+  const verifyPhoneOtp = async (phone: string, otp: string, name?: string): Promise<PhoneVerifyResponse> => {
     setLoading(true);
     try {
-      // Step 1: Open Google's official account selection / login page
-      const googleCred = await signInWithGoogleOAuth();
-      // Step 2: Send verified credential to server to authenticate/create household
-      try {
-        const res = await api.loginGoogle(googleCred);
+      const currentDevId = getDeviceId();
+      const currentDevName = getDeviceName();
+      const res = await api.verifyPhoneOtp(phone, otp, name, currentDevId, currentDevName);
+      if (res.conflict) {
+        // Do not set user, return conflict payload to show prompt to user
+        return res;
+      }
+      if (res.user && res.token) {
         setUser(res.user);
-        setHomes(res.homes);
-        if (res.homes && res.homes.length > 0) {
-          setActiveHomeId(res.homes[0].id);
+        const userHomes = res.homes || [];
+        setHomes(userHomes);
+        if (userHomes.length > 0) {
+          setActiveHomeId(userHomes[0].id);
         }
-      } catch (serverErr) {
-        console.warn('Backend server /api/auth/google failed, creating client session:', serverErr);
-        const fallbackUserId = 'usr_' + Math.random().toString(36).substring(2, 10);
-        const fallbackHomeId = 'home_' + Math.random().toString(36).substring(2, 10);
-        const displayName = googleCred.name || googleCred.email.split('@')[0];
-        const fallbackUser: User = {
-          id: fallbackUserId,
-          email: googleCred.email,
-          name: displayName,
-          avatar_color: '#0284C7',
-        };
-        const fallbackHome: Home = {
-          id: fallbackHomeId,
-          name: `${displayName}'s Home`,
-          currency_symbol: '₹',
-          currency_code: 'INR',
-          role: 'admin',
-        };
-        setUser(fallbackUser);
-        setHomes([fallbackHome]);
-        setActiveHomeId(fallbackHomeId);
       }
+      return res;
     } finally {
       setLoading(false);
     }
   };
 
-  const register = async (email: string, pass: string, name: string, homeName?: string) => {
+  const setupNewHome = async (payload: {
+    homeName: string;
+    currencySymbol?: string;
+    currencyCode?: string;
+    members?: SetupMemberInput[];
+  }) => {
     setLoading(true);
     try {
-      const res = await api.register(email, pass, name, homeName);
-      setUser(res.user);
-      const userHomes = res.homes && res.homes.length > 0 ? res.homes : (res.home ? [res.home] : []);
-      setHomes(userHomes);
-      if (userHomes.length > 0) {
-        setActiveHomeId(userHomes[0].id);
+      const res = await api.setupNewHome(payload);
+      if (res.home) {
+        setHomes((prev) => [res.home, ...prev]);
+        setActiveHomeId(res.home.id);
       }
+      return res;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const resolvePhoneConflict = async (
+    conflictToken: string,
+    action: 'continue' | 'cancel'
+  ): Promise<{ success?: boolean; cancelled?: boolean; message?: string }> => {
+    setLoading(true);
+    try {
+      const currentDevId = getDeviceId();
+      const currentDevName = getDeviceName();
+      const res = await api.resolvePhoneConflict(conflictToken, action, currentDevId, currentDevName);
+      if (action === 'continue' && res.user && res.token) {
+        setUser(res.user);
+        const userHomes = res.homes || [];
+        setHomes(userHomes);
+        if (userHomes.length > 0) {
+          setActiveHomeId(userHomes[0].id);
+        }
+      }
+      return res;
     } finally {
       setLoading(false);
     }
@@ -194,7 +233,6 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const logout = async () => {
     try {
       await api.logout();
-      await signOutGoogle();
     } finally {
       setStoredToken(null);
       setUser(null);
@@ -221,10 +259,15 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         activeHome,
         loading,
         currencySymbol,
+        deviceId,
+        deviceName,
+        sessionRevokedMessage,
+        clearSessionRevokedMessage,
         setActiveHomeId,
-        login,
-        loginGoogle,
-        register,
+        sendPhoneOtp,
+        verifyPhoneOtp,
+        resolvePhoneConflict,
+        setupNewHome,
         updateProfile,
         logout,
         refreshMe,
